@@ -2,7 +2,6 @@ require 'puppet/error'
 require 'puppet/util/puppetdb'
 require 'puppet/util/puppetdb/http'
 require 'puppet/util/puppetdb/command_names'
-require 'puppet/util/puppetdb/char_encoding'
 require 'json'
 
 class Puppet::Util::Puppetdb::Command
@@ -28,7 +27,11 @@ class Puppet::Util::Puppetdb::Command
     @version = version
     @certname = certname
     profile("Format payload", [:puppetdb, :payload, :format]) do
-      @payload = self.class.format_payload(command, version, payload)
+      @payload = {
+        :command => command,
+        :version => version,
+        :payload => payload,
+      }.to_json
     end
   end
 
@@ -82,27 +85,13 @@ class Puppet::Util::Puppetdb::Command
     end
   end
 
-
-  # @!group Private class methods
-
-  # @api private
-  def self.format_payload(command, version, payload)
-    message = {
-      :command => command,
-      :version => version,
-      :payload => payload,
-    }.to_pson
-
-    Puppet::Util::Puppetdb::CharEncoding.utf8_string(message)
-  end
-
   # @!group Private instance methods
 
   # @api private
   def headers
     {
       "Accept" => "application/json",
-      "Content-Type" => "application/json",
+      "Content-Type" => "application/json; charset=utf-8",
     }
   end
 
