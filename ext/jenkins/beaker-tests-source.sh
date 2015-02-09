@@ -44,4 +44,4 @@ chmod +x leiningen/lein
 
 # Now run our tests
 PATH=$PATH:$(pwd)/leiningen \
-bundle exec rake beaker:acceptance
+bundle exec rake beaker:acceptance ["acceptance/tests/storeconfigs/file_with_binary_template.rb"]
