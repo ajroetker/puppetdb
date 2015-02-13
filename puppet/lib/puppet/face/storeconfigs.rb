@@ -48,7 +48,7 @@ if Puppet::Util::Puppetdb.puppet3compat?
             filename = File.join(catalog_dir, "#{catalog[:name]}.json")
 
             File.open(filename, 'w') do |file|
-              file.puts catalog.to_pson
+              file.puts catalog.to_json
             end
           end
 
@@ -59,12 +59,12 @@ if Puppet::Util::Puppetdb.puppet3compat?
           File.open(File.join(workdir, 'export-metadata.json'), 'w') do |file|
             metadata = {
               'timestamp' => timestamp,
-              'command-versions' => {
-                'replace-catalog' => 5,
+              'command_versions' => {
+                'replace_catalog' => 6,
               }
             }
 
-            file.puts metadata.to_pson
+            file.puts metadata.to_json
           end
 
           tarfile = destination_file(timestamp)
