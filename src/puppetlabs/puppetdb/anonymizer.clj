@@ -299,33 +299,22 @@
    :post [(coll? %)]}
   (map #(anonymize-containment-path-element % context config) path))
 
-(defn update-in-nil
-  "Wrapper around update-in that ignores keys with nil"
-  [m [k] f & args]
-  (if (nil? (get m k))
-    m
-    (if args
-      (apply update-in m [k] f args)
-      (apply update-in m [k] f))))
-
 (defn anonymize-resource
   "Anonymize a resource"
-  [resource context config]
+  [resource {:strs [node]} config]
   {:pre  [(resource? resource)]
    :post [(resource? %)]}
-  (let [newcontext {"node"  (get context "node")
-                    "title" (get resource "title")
-                    "tags"  (get resource "tags")
-                    "file"  (get resource "file")
-                    "line"  (get resource "line")
-                    "type"  (get resource "type")}]
+  (let [context (-> (select-keys resource ["title" "tags" "file" "line" "type"])
+                    (assoc "node" node))
+        ;; Wrapper around anonymize-leaf that ignores keys with nil
+        anonymize-leaf-nil (fn [v & args] (when (not (nil? v)) (apply anonymize-leaf v args)))]
     (-> resource
-        (update-in-nil ["file"]       anonymize-leaf :file newcontext config)
-        (update-in-nil ["line"]       anonymize-leaf :line newcontext config)
-        (update-in     ["parameters"] anonymize-parameters newcontext config)
-        (update-in     ["tags"]       anonymize-tags newcontext config)
-        (update-in     ["title"]      anonymize-leaf :title newcontext config)
-        (update-in     ["type"]       anonymize-leaf :type newcontext config))))
+        (update-in ["file"]       anonymize-leaf-nil :file context config)
+        (update-in ["line"]       anonymize-leaf-nil :line context config)
+        (update-in ["parameters"] anonymize-parameters context config)
+        (update-in ["tags"]       anonymize-tags context config)
+        (update-in ["title"]      anonymize-leaf :title context config)
+        (update-in ["type"]       anonymize-leaf :type context config))))
 
 (defn anonymize-resources
   "Anonymize a collection of resources"
