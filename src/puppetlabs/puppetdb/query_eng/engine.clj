@@ -502,7 +502,7 @@
                :alias "events"
                :subquery? false
                :entity :events
-               :supports-extract? true
+               :supports-extract? false
                :source-table "resource_events"}))
 
 (def latest-report-query
