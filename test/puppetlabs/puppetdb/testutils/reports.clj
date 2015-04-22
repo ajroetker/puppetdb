@@ -80,7 +80,7 @@
    (let [example-report  (munge-example-report-for-storage example-report)
          report-hash     (shash/report-identity-hash (scf-store/normalize-report example-report))]
      (scf-store/maybe-activate-node! (:certname example-report) timestamp)
-     (scf-store/add-report!* example-report timestamp update-latest-report?)
+     (scf-store/add-report! example-report timestamp update-latest-report?)
      (report-for-hash :v4 report-hash))))
 
 (defn expected-report

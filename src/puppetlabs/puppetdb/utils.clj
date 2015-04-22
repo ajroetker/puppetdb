@@ -111,13 +111,6 @@
   (and (>= 0 (compare \0 c))
        (>= 0 (compare c \9))))
 
-(defn update-vals
-  "This function is like update-in, except the vector argument contains top-level
-  keys rather than nested.  Applies function f to values corresponding to keys
-  ks in map m."
-  [m ks f]
-  (reduce #(update-in %1 [%2] f) m ks))
-
 (defn update-cond
   "Works like update, but only if pred is satisfied"
   [m pred ks f & args]
@@ -134,7 +127,7 @@
 (defn vector-maybe
   "Vectorize an argument if it's not already vector"
   [v]
-  (if (vector? v) v (vector v)))
+  (if (vector? v) v [v]))
 
 (defn collapse-seq
   "Lazily consumes and collapses the seq `rows`. Uses `split-pred` to chunk the seq,
@@ -229,6 +222,8 @@
    to one with string keys. Doens't walk the map so nested
    schema won't work."
   [kwd-schema]
-  (reduce-kv (fn [acc k v]
-               (assoc acc (schema.core/required-key (puppetlabs.puppetdb.utils/kwd->str k)) v))
-             {} kwd-schema))
+  (let [kwd->required-str (comp schema.core/required-key
+                                puppetlabs.puppetdb.utils/kwd->str)]
+    (into {}
+          (for [[k v] kwd-schema]
+            [(kwd->required-str k) v]))))

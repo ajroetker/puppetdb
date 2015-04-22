@@ -23,7 +23,6 @@
             [puppetlabs.puppetdb.reports :as reports]
             [puppetlabs.puppetdb.facts :as facts :refer [facts-schema]]
             [puppetlabs.kitchensink.core :as kitchensink]
-            [puppetlabs.puppetdb.scf.storage-utils :as sutils]
             [puppetlabs.puppetdb.jdbc :as jdbc]
             [clojure.java.jdbc :as sql]
             [clojure.set :as set]
@@ -192,29 +191,23 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Certname querying/deleting
 
-(defn certname-exists?
+(defn-validated certname-exists?
   "Returns a boolean indicating whether or not the given certname exists in the db"
-  [certname]
-  {:pre [certname]}
-  (sql/with-query-results result-set
-    ["SELECT 1 FROM certnames WHERE certname=? LIMIT 1" certname]
-    (pos? (count result-set))))
+  [certname :- String]
+  (pos? (count (query-to-vec "SELECT 1 FROM certnames WHERE certname=? LIMIT 1" certname))))
 
-(defn delete-certname!
+(defn-validated delete-certname!
   "Delete the given host from the db"
-  [certname]
-  {:pre [certname]}
+  [certname :- String]
   (sql/delete-rows :certnames ["certname=?" certname]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Node activation/deactivation
 
-(defn stale-nodes
+(defn-validated stale-nodes :- [String]
   "Return a list of nodes that have seen no activity between
   (now-`time` and now)"
-  [time]
-  {:pre  [(kitchensink/datetime? time)]
-   :post [(coll? %)]}
+  [time :- pls/Timestamp]
   (let [ts (to-timestamp time)]
     (map :certname (jdbc/query-to-vec "SELECT c.certname FROM certnames c
                                        LEFT OUTER JOIN catalogs clogs ON c.certname=clogs.certname
@@ -224,68 +217,58 @@
                                        AND (fs.timestamp IS NULL OR fs.timestamp < ?)"
                                       ts ts))))
 
-(defn node-deactivated-time
+(defn-validated node-deactivated-time
   "Returns the time the node specified by `certname` was deactivated, or nil if
   the node is currently active."
-  [certname]
-  {:pre [(string? certname)]}
-  (sql/with-query-results result-set
-    ["SELECT deactivated FROM certnames WHERE certname=?" certname]
-    (:deactivated (first result-set))))
+  [certname :- String]
+  (:deactivated (first (query-to-vec "SELECT deactivated FROM certnames WHERE certname=?" certname))))
 
-(defn purge-deactivated-nodes!
+(defn-validated purge-deactivated-nodes!
   "Delete nodes from the database which were deactivated before `time`."
-  [time]
-  {:pre [(kitchensink/datetime? time)]}
+  [time :- pls/Timestamp]
   (let [ts (to-timestamp time)]
     (sql/delete-rows :certnames ["deactivated < ?" ts])))
 
-(defn activate-node!
+(defn-validated activate-node!
   "Reactivate the given host.  Adds the host to the database if it was not
   already present."
-  [certname]
-  {:pre [(string? certname)]}
+  [certname :- String]
   (when-not (certname-exists? certname)
     (add-certname! certname))
-  (sql/update-values :certnames
-                     ["certname=?" certname]
-                     {:deactivated nil}))
+  (sql/update-values :certnames ["certname=?" certname] {:deactivated nil}))
 
-
-(pls/defn-validated create-row :- s/Int
+(defn-validated create-row :- s/Int
   "Creates a row using `row-map` for `table`, returning the PK that was created upon insert"
   [table :- s/Keyword
    row-map :- {s/Keyword s/Any}]
   (:id (first (sql/insert-records table row-map))))
 
-(pls/defn-validated query-id :- (s/maybe s/Int)
+(defn-validated query-id :- (s/maybe s/Int)
   "Returns the id (primary key) from `table` that contain `row-map` values"
   [table :- s/Keyword
    row-map :- {s/Keyword s/Any}]
   (let [cols (keys row-map)
         where-clause (str "where " (str/join " " (map (fn [col] (str (name col) "=?") ) cols)))]
-    (sql/with-query-results rs (apply vector (format "select id from %s %s" (name table) where-clause) (map row-map cols))
-      (:id (first rs)))))
+    (:id (first (apply query-to-vec (format "select id from %s %s" (name table) where-clause) (map row-map cols))))))
 
-(pls/defn-validated ensure-row :- (s/maybe s/Int)
+(defn-validated ensure-row :- (s/maybe s/Int)
   "Check if the given row (defined by `row-map` exists in `table`, creates it if it does not. Always returns
    the id of the row (whether created or existing)"
   [table :- s/Keyword
    row-map :- {s/Keyword s/Any}]
   (when row-map
-    (if-let [id (query-id table row-map)]
-      id
-      (create-row table row-map))))
+    (or (query-id table row-map)
+        (create-row table row-map))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Environments querying/updating
 
-(pls/defn-validated environment-id :- (s/maybe s/Int)
+(defn-validated environment-id :- (s/maybe s/Int)
   "Returns the id (primary key) from the environments table for the given `env-name`"
   [env-name :- s/Str]
   (query-id :environments {:name env-name}))
 
-(pls/defn-validated ensure-environment :- (s/maybe s/Int)
+(defn-validated ensure-environment :- (s/maybe s/Int)
   "Check if the given `env-name` exists, creates it if it does not. Always returns
    the id of the `env-name` (whether created or existing)"
   [env-name :- (s/maybe s/Str)]
@@ -295,12 +278,12 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Status querying/updating
 
-(pls/defn-validated status-id :- (s/maybe s/Int)
+(defn-validated status-id :- (s/maybe s/Int)
   "Returns the id (primary key) from the result_statuses table for the given `status`"
   [status :- s/Str]
   (query-id :report_statuses {:status status}))
 
-(pls/defn-validated ensure-status :- (s/maybe s/Int)
+(defn-validated ensure-status :- (s/maybe s/Int)
   "Check if the given `status` exists, creates it if it does not. Always returns
    the id of the `status` (whether created or existing)"
   [status :- (s/maybe s/Str)]
@@ -310,104 +293,104 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Catalog updates/changes
 
-(defn catalog-metadata
+(defn-validated catalog-metadata :- (s/maybe {:id (s/maybe s/Int)
+                                              :hash (s/maybe String)})
   "Returns the id and hash of certname's catalog"
-  [certname]
-  {:pre [certname]}
-  (sql/with-query-results result-set
-    [(format "SELECT id, %s AS hash FROM catalogs WHERE certname=?" (sutils/sql-hash-as-str "catalogs.hash"))
-     certname]
-    (first result-set)))
+  [certname :- String]
+  (-> (format "SELECT id, %s AS hash FROM catalogs WHERE certname=?" (sutils/sql-hash-as-str "catalogs.hash"))
+      (query-to-vec certname)
+      first))
 
-(pls/defn-validated catalog-row-map
+(def normalize-catalog-row
+  (partial kitchensink/maptrans
+           {[:hash] sutils/munge-hash-for-storage
+            [:transaction_uuid] sutils/munge-uuid-for-storage
+            [:timestamp :producer_timestamp] to-timestamp
+            [:environment_id] ensure-environment}))
+
+(def catalog-row-schema
+  {:api_version (s/maybe (s/either String s/Int))
+   :catalog_version (s/maybe String)
+   :environment_id (s/maybe (s/either String s/Int))
+   :producer_timestamp pls/Timestamp
+   :transaction_uuid (s/maybe String)
+   :timestamp (s/maybe pls/Timestamp)
+   :hash (s/maybe String)})
+
+(defn-validated catalog-row :- catalog-row-schema
   "Creates a row map for the catalogs table, optionally adding envrionment when it was found"
-  [hash
-   {:keys [api_version version transaction_uuid environment producer_timestamp]} :- catalog-schema
-   timestamp :- pls/Timestamp]
-  {:hash (sutils/munge-hash-for-storage hash)
-   :api_version api_version
-   :catalog_version  version
-   :transaction_uuid (sutils/munge-uuid-for-storage transaction_uuid)
-   :timestamp (to-timestamp timestamp)
-   :environment_id (ensure-environment environment)
-   :producer_timestamp (to-timestamp producer_timestamp)})
-
-(pls/defn-validated update-catalog-metadata!
-  "Given some catalog metadata, update the db"
-  [id :- Number
-   hash :- String
+  [hash :- String
    catalog :- catalog-schema
    timestamp :- pls/Timestamp]
-  (sql/update-values :catalogs
-                     ["id=?" id]
-                     (catalog-row-map hash catalog timestamp)))
+  (-> catalog
+      (select-keys [:api_version :version :transaction_uuid :environment :producer_timestamp])
+      (assoc :hash hash :timestamp timestamp)
+      (clojure.set/rename-keys {:environment :environment_id :version :catalog_version})
+      normalize-catalog-row))
 
-(pls/defn-validated add-catalog-metadata!
+(defn-validated update-catalog-metadata!
+  "Given some catalog metadata, update the db"
+  [id :- Number
+   catalog-row :- catalog-row-schema]
+  (sql/update-values :catalogs ["id=?" id] catalog-row))
+
+(defn-validated add-catalog-metadata! :- [{s/Any s/Any}]
   "Given some catalog metadata, persist it in the db. Returns a map of the
   inserted data including any autogenerated columns."
-  [hash :- String
-   {:keys [certname] :as catalog} :- catalog-schema
-   timestamp :- pls/Timestamp]
-  {:post [(map? %)]}
-  (first (sql/insert-records :catalogs
-                             (assoc (catalog-row-map hash catalog timestamp)
-                                    :certname certname))))
+  [certname :- String
+   catalog-row :- catalog-row-schema]
+  (sql/insert-records :catalogs (assoc catalog-row :certname certname)))
 
-(pls/defn-validated resources-exist? :- #{String}
+(defn-validated existing-resources :- #{String}
   "Given a collection of resource-hashes, return the subset that
   already exist in the database."
   [resource-hashes :- #{String}]
   (if (seq resource-hashes)
-    (let [query (apply vector
-                       (format "SELECT DISTINCT %s AS resource FROM resource_params_cache WHERE %s %s"
-                               (sutils/sql-hash-as-str "resource")
-                               (sutils/sql-hash-as-str "resource")
-                               (jdbc/in-clause resource-hashes))
-                       resource-hashes)]
-      (sql/with-query-results result-set
-        query
-        (set (map :resource result-set))))
+    (let [query-str
+          (format "SELECT DISTINCT %s AS resource FROM resource_params_cache WHERE %s %s"
+                  (sutils/sql-hash-as-str "resource")
+                  (sutils/sql-hash-as-str "resource")
+                  (jdbc/in-clause resource-hashes))]
+      (set (map :resource (apply query-to-vec query-str resource-hashes))))
     #{}))
 
 ;;The schema definition of this function should be
 ;;resource-ref->resource-schema, but there are a lot of tests that
 ;;have incorrect data. When examples.clj and tests get fixed, this
 ;;should be changed to the correct schema
-(pls/defn-validated catalog-resources
+(defn-validated catalog-resources
   "Returns the resource hashes keyed by resource reference"
   [catalog-id :- Number]
   (sql/with-query-results result-set
     [(format "SELECT type, title, tags, exported, file, line, %s AS resource
-              FROM catalog_resources
-              WHERE catalog_id = ?" (sutils/sql-hash-as-str "resource")) catalog-id]
+                             FROM catalog_resources
+                             WHERE catalog_id = ?" (sutils/sql-hash-as-str "resource")) catalog-id]
     (zipmap (map #(select-keys % [:type :title]) result-set)
             (jdbc/convert-result-arrays set result-set))))
 
-(pls/defn-validated new-params-only
+(defn-validated new-params-only
   "Returns a map of not persisted parameters, keyed by hash"
   [persisted-params :- #{String}
    refs-to-resources :- resource-ref->resource-schema
    refs-to-hashes :- resource-ref->hash]
-  (reduce-kv (fn [acc resource-ref {:keys [parameters]}]
-               (let [resource-hash (get refs-to-hashes resource-ref)]
-                 (if (contains? persisted-params (refs-to-hashes resource-ref))
-                   acc
-                   (assoc acc resource-hash parameters))))
-             {} refs-to-resources))
+  (->> refs-to-resources
+       (remove #(contains? persisted-params (refs-to-hashes (key %))))
+       (kitchensink/mapkeys #(sutils/munge-hash-for-storage (get refs-to-hashes %)))
+       (kitchensink/mapvals :parameters)))
 
-(pls/defn-validated insert-records*
+(defn-validated insert-records*
   "Nil/empty safe insert-records, see java.jdbc's insert-records for more "
   [table :- s/Keyword
    record-coll :- [{s/Keyword s/Any}]]
   (when (seq record-coll)
     (apply sql/insert-records table record-coll)))
 
-(pls/defn-validated add-params!
+(defn-validated add-params!
   "Persists the new parameters found in `refs-to-resources` and populates the
    resource_params_cache."
   [refs-to-resources :- resource-ref->resource-schema
    refs-to-hashes :- resource-ref->hash]
-  (let [new-params (new-params-only (resources-exist? (kitchensink/valset refs-to-hashes))
+  (let [new-params (new-params-only (existing-resources (kitchensink/valset refs-to-hashes))
                                     refs-to-resources
                                     refs-to-hashes)]
 
@@ -415,28 +398,25 @@
 
     (insert-records*
      :resource_params_cache
-     (map (fn [[resource-hash params]]
-            {:resource (sutils/munge-hash-for-storage resource-hash) :parameters (when params (sutils/db-serialize params))})
-          new-params))
+     (for [[resource params] new-params]
+       {:resource resource :parameters (when params (sutils/db-serialize params))}))
 
     (insert-records*
      :resource_params
-     (for [[resource-hash params] new-params
+     (for [[resource params] new-params
            [k v] params]
-       {:resource (sutils/munge-hash-for-storage resource-hash) :name (name k) :value (sutils/db-serialize v)}))))
+       {:resource resource :name (name k) :value (sutils/db-serialize v)}))))
 
 (def resource-ref?
   "Returns true of the map is a resource reference"
   (every-pred :type :title))
 
 (defn convert-tags-array
-  "Converts the given tags (if present) to the format the database expects"
+  "Converts the given tags to the format the database expects"
   [resource]
-  (if (contains? resource :tags)
-    (update-in resource [:tags] sutils/to-jdbc-varchar-array)
-    resource))
+  (utils/update-when resource [:tags] sutils/to-jdbc-varchar-array))
 
-(pls/defn-validated insert-catalog-resources!
+(defn-validated insert-catalog-resources!
   "Returns a function that accepts a seq of ref keys to insert"
   [catalog-id :- Number
    refs-to-hashes :- {resource-ref-schema String}
@@ -448,20 +428,16 @@
 
     (insert-records*
      :catalog_resources
-     (map (fn [resource-ref]
-            (let [{:keys [type title exported parameters tags file line] :as resource} (get refs-to-resources resource-ref)]
-              (convert-tags-array
-               {:catalog_id catalog-id
-                :resource (sutils/munge-hash-for-storage (get refs-to-hashes resource-ref))
-                :type type
-                :title title
-                :tags tags
-                :exported exported
-                :file file
-                :line line})))
-          refs-to-insert))))
+     (for [resource-ref refs-to-insert
+           :let [resource (-> (get refs-to-hashes resource-ref)
+                              sutils/munge-hash-for-storage)]]
+       (-> (get refs-to-resources resource-ref)
+           (select-keys [:type :title :exported :parameters :tags :file :line])
+           (utils/assoc-when :tags nil)
+           (assoc :catalog_id catalog-id :resource resource)
+           convert-tags-array)))))
 
-(pls/defn-validated delete-catalog-resources!
+(defn-validated delete-catalog-resources!
   "Returns a function accepts old catalog resources that should be deleted."
   [catalog-id :- Number]
   (fn [refs-to-delete]
@@ -477,38 +453,31 @@
    This is different from clojure.data/diff in that it treats non-equal sets as completely different
    (rather than returning only the differing items of the set) and only returns differences from `right`."
   [left right]
-  (reduce-kv (fn [acc k right-value]
-               (let [left-value (get left k)]
-                 (if (= left-value right-value)
-                   acc
-                   (assoc acc k right-value))))
-             {} right))
+  (into {} (remove #(= (get left (key %)) (val %)) right)))
 
 (s/defn diff-resources-metadata
   "Return resource references with values that are only the key/values that from `right` that
    are different from those of the `left`. The keys/values here are suitable for issuing update
    statements that will update resources to the correct (new) values."
   [left right]
-  (reduce-kv (fn [acc k right-values]
-               (let [updated-resource-vals (basic-diff (get left k) right-values)]
-                 (if (seq updated-resource-vals)
-                   (assoc acc k updated-resource-vals)
-                   acc))) {} right))
+  (->> (for [[k rv] right :let [lv (get left k)]] [k (basic-diff lv rv)])
+       (remove (comp nil? seq second))
+       (into {})))
 
 (defn merge-resource-hash
   "Assoc each hash from `refs-to-hashes` as :resource on `refs-to-resources`"
   [refs-to-hashes refs-to-resources]
-  (reduce-kv (fn [acc k v]
-               (assoc-in acc [k :resource] (get refs-to-hashes k)))
-             refs-to-resources refs-to-resources))
+  (into refs-to-resources
+        (for [[k v] refs-to-resources
+              :let [resource (get refs-to-hashes k)]]
+          [k (assoc v :resource resource)])))
 
-(pls/defn-validated update-catalog-resources!
+(defn-validated update-catalog-resources!
   "Returns a function accepting keys that were the same from the old resources and the new resources."
   [catalog-id :- Number
    refs-to-hashes :- {resource-ref-schema String}
    refs-to-resources
    old-resources]
-
   (fn [maybe-updated-refs]
     {:pre [(every? resource-ref? maybe-updated-refs)]}
     (let [new-resources-with-hash (merge-resource-hash refs-to-hashes (select-keys refs-to-resources maybe-updated-refs))
@@ -528,7 +497,7 @@
   [resource]
   (dissoc resource :parameters))
 
-(pls/defn-validated add-resources!
+(defn-validated add-resources!
   "Persist the given resource and associate it with the given catalog."
   [catalog-id :- Number
    refs-to-resources :- resource-ref->resource-schema
@@ -543,20 +512,20 @@
                     (insert-catalog-resources! catalog-id refs-to-hashes diffable-resources)
                     (update-catalog-resources! catalog-id refs-to-hashes diffable-resources old-resources)))))
 
-(pls/defn-validated catalog-edges-map
+(defn-validated catalog-edges-map
   "Return all edges for a given catalog id as a map"
   [certname :- String]
-  (sql/with-query-results result-set
-    [(format "SELECT %s AS source, %s AS target, type FROM edges WHERE certname=?"
-             (sutils/sql-hash-as-str "source")
-             (sutils/sql-hash-as-str "target")) certname]
+  (let [result-set (query-to-vec
+                    (format "SELECT %s AS source, %s AS target, type FROM edges WHERE certname=?"
+                            (sutils/sql-hash-as-str "source") (sutils/sql-hash-as-str "target"))
+                    certname)]
     ;; Transform the result-set into a map with [source,target,type] as the key
     ;; and nil as always the value. This just feeds into clojure.data/diff
     ;; better this way.
     (zipmap (map vals result-set)
             (repeat nil))))
 
-(pls/defn-validated delete-edges!
+(defn-validated delete-edges!
   "Delete edges for a given certname.
 
   Edges must be either nil or a collection of lists containing each element
@@ -576,7 +545,7 @@
                               (sutils/sql-hash-as-str "source")
                               (sutils/sql-hash-as-str "target")) certname source target type])))
 
-(pls/defn-validated insert-edges!
+(defn-validated insert-edges!
   "Insert edges for a given certname.
 
   Edges must be either nil or a collection of lists containing each element
@@ -596,9 +565,9 @@
                   :type type})]
 
       (update! (:catalog-volatility performance-metrics) (count rows))
-      (apply sql/insert-records :edges rows))))
+      (insert-records* :edges rows))))
 
-(pls/defn-validated replace-edges!
+(defn-validated replace-edges!
   "Persist the given edges in the database
 
   Each edge is looked up in the supplied resources map to find a
@@ -624,86 +593,89 @@
                    #(delete-edges! certname %)
                    identity)))
 
-(pls/defn-validated update-catalog-hash-match
+(defn-validated update-catalog-hash-match
   "When a new incoming catalog has the same hash as an existing catalog, update performance-metrics
    and the transaction id for the new catalog"
   [catalog-id :- Number
-   hash :- String
-   catalog :- catalog-schema
-   timestamp :- pls/Timestamp]
+   catalog-row :- catalog-row-schema]
   (inc! (:duplicate-catalog performance-metrics))
   (time! (:catalog-hash-match performance-metrics)
-         (update-catalog-metadata! catalog-id hash catalog timestamp)))
+         (update-catalog-metadata! catalog-id catalog-row)))
 
-(pls/defn-validated update-catalog-associations!
+(defn-validated update-catalog-associations!
   "Adds/updates/deletes the edges and resources for the given certname"
   [catalog-id :- Number
-   {:keys [resources edges certname]} :- catalog-schema
+   certname :- String
+   resources
+   edges
    refs-to-hashes :- {resource-ref-schema String}]
   (time! (:add-resources performance-metrics)
          (add-resources! catalog-id resources refs-to-hashes))
   (time! (:add-edges performance-metrics)
          (replace-edges! certname edges refs-to-hashes)))
 
-(pls/defn-validated update-catalog-hash-miss
+(defn-validated update-catalog-hash-miss
   "New catalogs for a given certname needs to have their metadata, resources and edges updated.  This
    function also outputs debugging related information when `catalog-hash-debug-dir` is not nil"
   [catalog-id :- Number
    hash :- String
-   catalog :- catalog-schema
+   certname
+   catalog-row :- catalog-row-schema
+   resources
+   edges
    refs-to-hashes :- {resource-ref-schema String}
-   catalog-hash-debug-dir :- (s/maybe s/Str)
-   timestamp :- pls/Timestamp]
+   catalog-hash-debug-dir :- (s/maybe s/Str)]
 
   (inc! (:updated-catalog performance-metrics))
 
   (when catalog-hash-debug-dir
-    (hashdbg/debug-catalog catalog-hash-debug-dir hash catalog))
+    (hashdbg/debug-catalog catalog-hash-debug-dir hash certname resources edges))
 
   (time! (:catalog-hash-miss performance-metrics)
-         (update-catalog-metadata! catalog-id hash catalog timestamp)
-         (update-catalog-associations! catalog-id catalog refs-to-hashes)))
+         (update-catalog-metadata! catalog-id catalog-row)
+         (update-catalog-associations! catalog-id certname resources edges refs-to-hashes)))
 
-(pls/defn-validated add-new-catalog
+(defn-validated add-new-catalog
   "Creates new catalog metadata and adds the proper associations for the edges and resources"
-  [hash :- String
-   catalog :- catalog-schema
-   refs-to-hashes :- {resource-ref-schema String}
-   timestamp :- pls/Timestamp]
+  [certname :- String
+   catalog-row
+   resources
+   edges
+   refs-to-hashes :- {resource-ref-schema String}]
   (inc! (:updated-catalog performance-metrics))
   (time! (:add-new-catalog performance-metrics)
-         (let [catalog-id (:id (add-catalog-metadata! hash catalog timestamp))]
-           (update-catalog-associations! catalog-id catalog refs-to-hashes))))
+         (-> (add-catalog-metadata! certname catalog-row)
+             ((comp :id first))
+             (update-catalog-associations! certname resources edges refs-to-hashes))))
 
-(pls/defn-validated add-catalog!
+(defn-validated add-catalog!
   "Persist the supplied catalog in the database, returning its
    similarity hash. `catalog-hash-debug-dir` is an optional path that
    indicates where catalog debugging information should be stored."
   ([catalog :- catalog-schema]
    (add-catalog! catalog nil (now)))
-  ([{:keys [api_version resources edges certname] :as catalog} :- catalog-schema
+  ([{:keys [resources certname edges] :as catalog} :- catalog-schema
     catalog-hash-debug-dir :- (s/maybe s/Str)
     timestamp :- pls/Timestamp]
 
    (let [refs-to-hashes (time! (:resource-hashes performance-metrics)
-                               (reduce-kv (fn [acc k v]
-                                            (assoc acc k (shash/resource-identity-hash v)))
-                                          {} resources))
+                               (kitchensink/mapvals shash/resource-identity-hash resources))
          hash           (time! (:catalog-hash performance-metrics)
                                (shash/catalog-similarity-hash catalog))
          {id :id
-          stored-hash :hash} (catalog-metadata certname)]
+          stored-hash :hash} (catalog-metadata certname)
+         row-map (catalog-row hash catalog timestamp)]
 
      (sql/transaction
       (cond
        (nil? id)
-       (add-new-catalog hash catalog refs-to-hashes timestamp)
+       (add-new-catalog certname row-map resources edges refs-to-hashes)
 
        (= stored-hash hash)
-       (update-catalog-hash-match id hash catalog timestamp)
+       (update-catalog-hash-match id row-map)
 
        :else
-       (update-catalog-hash-miss id hash catalog refs-to-hashes catalog-hash-debug-dir timestamp)))
+       (update-catalog-hash-miss id hash certname row-map resources edges refs-to-hashes catalog-hash-debug-dir)))
 
      hash)))
 
@@ -716,9 +688,10 @@
 (defn catalog-hash-for-certname
   "Returns the hash for the `certname` catalog"
   [certname]
-  (sql/with-query-results result-set
-    ["SELECT %s as catalog FROM catalogs WHERE certname=?" (sutils/sql-hash-as-str "hash") certname]
-    (:catalog (first result-set))))
+  (-> (format "SELECT %s as catalog FROM catalogs WHERE certname=?" (sutils/sql-hash-as-str "hash"))
+      (query-to-vec certname)
+      first
+      :catalog))
 
 ;; ## Database compaction
 
@@ -756,16 +729,13 @@
   "Return a collection of pairs of [path-id value-id] for the indicated factset."
   [factset-id :- s/Int]
   (for [{:keys [fact_path_id fact_value_id]}
-        (query-to-vec "SELECT fact_path_id, fact_value_id FROM facts
-                         WHERE factset_id = ?" factset-id)]
+        (query-to-vec "SELECT fact_path_id, fact_value_id FROM facts WHERE factset_id = ?" factset-id)]
     [fact_path_id fact_value_id]))
 
 (defn-validated certname-to-factset-id :- s/Int
   "Given a certname, returns the factset id."
   [certname :- String]
-  (sql/with-query-results result-set
-    ["SELECT id from factsets WHERE certname = ?" certname]
-    (:id (first result-set))))
+  (:id (first (query-to-vec "SELECT id from factsets WHERE certname = ?" certname))))
 
 (defn-validated delete-pending-path-id-orphans!
   "Delete paths in dropped-pids that are no longer mentioned
@@ -790,9 +760,7 @@
   [factset-id removed-pid-vid-pairs]
   (when-let [removed-pid-vid-pairs (seq removed-pid-vid-pairs)]
     (let [vids (map second removed-pid-vid-pairs)
-          fp-id-pairs (map vector
-                           (repeat factset-id )
-                           (map first removed-pid-vid-pairs))
+          fp-id-pairs (map #(vector factset-id %) (map first removed-pid-vid-pairs))
           in-vids (jdbc/in-clause vids)
           in-fp-id-pairs (jdbc/in-clause-multi fp-id-pairs 2)]
       (sql/do-prepared
@@ -869,10 +837,10 @@
   [factset-id :- s/Int
    pairs :- (s/either [(s/pair s/Int "path-id" s/Int "value-id")]
                       #{(s/pair s/Int "path-id" s/Int "value-id")})]
-  (apply sql/insert-records
-         :facts
-         (for [[pid vid] pairs]
-           {:factset_id factset-id :fact_path_id pid :fact_value_id vid})))
+  (insert-records*
+    :facts
+    (for [[pid vid] pairs]
+      {:factset_id factset-id :fact_path_id pid :fact_value_id vid})))
 
 (defn existing-row-ids
   "Returns a map from value to id for each value that's already in the
@@ -891,7 +859,7 @@
   with their new :id values."
   [database records]
   (map #(assoc %2 :id %1)
-       (map :id (apply sql/insert-records database records))
+       (map :id (insert-records* database records))
        records))
 
 (defn realize-paths!
@@ -901,14 +869,13 @@
   (if-let [pathstrs (seq pathstrs)]
     (let [existing-path-ids (existing-row-ids :fact_paths "path" pathstrs)
           missing-db-paths (set/difference (set pathstrs)
-                                           (set (keys existing-path-ids)))]
-      (merge existing-path-ids
-             (into {}
-                   (map #(vector (:path %) (:id %))
-                        (realize-records!
-                         :fact_paths
-                         (map (comp facts/path->pathmap facts/string-to-factpath)
-                              missing-db-paths))))))
+                                           (kitchensink/keyset existing-path-ids))]
+      (into existing-path-ids
+            (for [{:keys [path id]}
+                  (realize-records! :fact_paths
+                                    (map (comp facts/path->pathmap facts/string-to-factpath)
+                                         missing-db-paths))]
+              [path id])))
     {}))
 
 (defn realize-values!
@@ -920,18 +887,15 @@
           existing-vhash-ids (existing-row-ids :fact_values (sutils/sql-hash-as-str "value_hash") vhashes)
           missing-vhashes (set/difference (set vhashes)
                                           (set (keys existing-vhash-ids)))]
-      (merge existing-vhash-ids
-             (into {}
-                   (map #(vector (sutils/parse-db-hash (:value_hash %)) (:id %))
-                        (realize-records!
-                         :fact_values
-                         (->> valuemaps
-                              (filter (comp missing-vhashes :value_hash))
-                              set
-                              (map #(update-in % [:value_hash] sutils/munge-hash-for-storage))))))))
+      (into existing-vhash-ids
+            (for [{:keys [value_hash id]}
+                  (realize-records! :fact_values
+                                    (distinct (filter #(missing-vhashes (:value_hash %))
+                                                      valuemaps)))]
+              [(sutils/parse-db-hash value_hash) id])))
     {}))
 
-(pls/defn-validated add-facts!
+(defn-validated add-facts!
   "Given a certname and a map of fact names to values, store records for those
   facts associated with the certname."
   ([fact-data] (add-facts! fact-data true))
@@ -941,15 +905,14 @@
    (sql/transaction
     (sql/insert-record
      :factsets
-     (merge
+     (cond->
       {:certname certname
        :timestamp (to-timestamp timestamp)
        :environment_id (ensure-environment environment)
        :producer_timestamp (to-timestamp producer_timestamp)}
-      (when include-hash?
-        {:hash (sutils/munge-hash-for-storage
-                (shash/generic-identity-hash
-                 (dissoc fact-data :timestamp :producer_timestamp)))})))
+      include-hash? (assoc :hash (-> (dissoc fact-data :timestamp :producer_timestamp)
+                                     shash/generic-identity-hash
+                                     sutils/munge-hash-for-storage))))
     ;; Ensure that all the required paths and values exist, and then
     ;; insert the new facts.
     (let [paths-and-valuemaps (facts/facts->paths-and-valuemaps values)
@@ -1018,125 +981,110 @@
                  shash/generic-identity-hash
                  sutils/munge-hash-for-storage)}))))
 
-(pls/defn-validated factset-timestamp :- (s/maybe pls/Timestamp)
+(defn-validated factset-timestamp :- (s/maybe pls/Timestamp)
   "Return the factset timestamp for the given certname, nil if not found"
   [certname :- String]
-  (sql/with-query-results result-set
-    ["SELECT timestamp FROM factsets WHERE certname=? ORDER BY timestamp DESC" certname]
-    (:timestamp (first result-set))))
+  (:timestamp
+   (first (query-to-vec ["SELECT timestamp FROM factsets WHERE certname=? ORDER BY timestamp DESC" certname]))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Reports
 
-(defn update-latest-report!
+(defn-validated update-latest-report!
   "Given a node name, updates the `certnames` table to ensure that it indicates the
    most recent report for the node."
-  [node]
-  {:pre [(string? node)]}
+  [node :- String]
   (let [latest-report (:id (first (query-to-vec
-                                    ["SELECT id FROM reports
-                                      WHERE certname = ?
-                                      ORDER BY end_time DESC
-                                      LIMIT 1" node])))]
+                                   "SELECT id FROM reports
+                                    WHERE certname = ?
+                                    ORDER BY end_time DESC
+                                    LIMIT 1" node)))]
     (sql/update-values
       :certnames
       ["certname = ?" node]
       {:latest_report_id latest-report})))
 
-(defn find-containing-class
+(defn-validated find-containing-class :- (s/maybe String)
   "Given a containment path from Puppet, find the outermost 'class'."
-  [containment-path]
-  {:pre [(or
-          (nil? containment-path)
-          (and (coll? containment-path) (every? string? containment-path)))]
-   :post [((some-fn nil? string?) %)]}
-  (when-not ((some-fn nil? empty?) containment-path)
+  [containment-path :- (s/maybe [String])]
+  (when (seq containment-path)
     ;; This is a little wonky.  Puppet only gives us an array of Strings
     ;; to represent the containment path.  Classes can be differentiated
     ;; from types because types have square brackets and a title; so, e.g.,
     ;; "Foo" is a class, but "Foo[Bar]" is a type with a title.
-    (first
-     (filter
-      #(not (or (empty? %) (kitchensink/string-contains? "[" %)))
-      (reverse containment-path)))))
+    (->> containment-path
+         reverse
+         (remove (some-fn empty? (partial kitchensink/string-contains? "[")))
+         first)))
 
 (defn maybe-environment
   "This fn is most to help in testing, instead of persisting a value of
   nil, just omit it from the row map. For tests that are running older versions
   of migrations, this function prevents a failure"
   [row-map]
-  (if (nil? (:environment_id row-map))
-    (dissoc row-map :environment_id)
-    row-map))
+  (kitchensink/dissoc-if-nil row-map :environment_id))
 
 (defn normalize-resource-event
   "Prep `event` for comparison/computation of a hash"
-  [event]
+  [{:keys [containment_path] :as event}]
   (-> event
       (utils/update-when [:timestamp] to-timestamp)
       (utils/update-when [:old_value] sutils/db-serialize)
       (utils/update-when [:new_value] sutils/db-serialize)
-      (assoc :containing_class (find-containing-class (:containment_path event)))))
+      (assoc :containing_class (find-containing-class containment_path))))
 
-(defn normalize-report
+(def normalize-report
   "Prep the report for comparison/computation of a hash"
-  [report]
-  (-> report
-      (update-in [:start_time] to-timestamp)
-      (update-in [:end_time] to-timestamp)
-      (update-in [:resource_events] #(map normalize-resource-event %))))
+  (partial kitchensink/maptrans
+           {[:start_time :end_time] to-timestamp
+            [:resource_events] (partial map normalize-resource-event)}))
 
 (defn convert-containment-path
   "Convert the contain path from a collection to the jdbc array type"
-  [event]
-  (utils/update-when event
-                     [:containment_path]
-                     (fn [cp]
-                       (when cp
-                         (sutils/to-jdbc-varchar-array cp)))))
+  [{:keys [containment_path] :as event}]
+  (utils/update-cond event containment_path [:containment_path] sutils/to-jdbc-varchar-array))
 
-(pls/defn-validated add-report!*
-  "Helper function for adding a report.  Accepts an extra parameter, `update-latest-report?`, which
+(defn-validated add-report!
+  "Add a report and all of the associated events to the database.
+  Helper function for adding a report.  Accepts an extra parameter, `update-latest-report?`, which
   is used to determine whether or not the `update-latest-report!` function will be called as part of
   the transaction.  This should always be set to `true`, except during some very specific testing
   scenarios."
-  [orig-report :- reports/report-wireformat-schema
-   timestamp :- pls/Timestamp
-   update-latest-report? :- s/Bool]
-  (time! (:store-report performance-metrics)
-         (let [{:keys [puppet_version certname report_format configuration_version
-                       start_time end_time resource_events transaction_uuid environment
-                       status noop metrics logs] :as report} (normalize-report orig-report)
+  ([report :- reports/report-wireformat-schema
+    timestamp :- pls/Timestamp]
+   (add-report! report timestamp true))
+  ([orig-report :- reports/report-wireformat-schema
+    timestamp :- pls/Timestamp
+    update-latest-report? :- s/Bool]
+   (time! (:store-report performance-metrics)
+          (let [{:keys [certname resource_events transaction_uuid environment
+                        status noop metrics logs] :as report} (normalize-report orig-report)
                 report-hash (shash/report-identity-hash report)]
-           (sql/transaction
-             (let [{:keys [id]} (sql/insert-record :reports
-                                 (maybe-environment
-                                   {:hash                   (sutils/munge-hash-for-storage report-hash)
-                                    :transaction_uuid       (sutils/munge-uuid-for-storage transaction_uuid)
-                                    :metrics                (sutils/munge-json-for-storage metrics)
-                                    :logs                   (sutils/munge-json-for-storage logs)
-                                    :noop                   noop
-                                    :puppet_version         puppet_version
-                                    :certname               certname
-                                    :report_format          report_format
-                                    :configuration_version  configuration_version
-                                    :start_time             start_time
-                                    :end_time               end_time
-                                    :receive_time           (to-timestamp timestamp)
-                                    :environment_id         (ensure-environment environment)
-                                    :status_id              (ensure-status status)}))]
-               (->> resource_events
-                    (map (comp convert-containment-path #(assoc % :report_id id)))
-                    (apply sql/insert-records :resource_events))
-               (when update-latest-report?
-                 (update-latest-report! certname)))))))
+            (sql/transaction
+             (let [{:keys [id]}
+                   (->> [:noop :puppet_version :certname :report_format :configuration_version :start_time :end_time]
+                        (select-keys report)
+                        (merge {:hash                   (sutils/munge-hash-for-storage report-hash)
+                                :transaction_uuid       (sutils/munge-uuid-for-storage transaction_uuid)
+                                :metrics                (sutils/munge-json-for-storage metrics)
+                                :logs                   (sutils/munge-json-for-storage logs)
+                                :receive_time           (to-timestamp timestamp)
+                                :environment_id         (ensure-environment environment)
+                                :status_id              (ensure-status status)})
+                        maybe-environment
+                        (sql/insert-record :reports))]
+                (->> resource_events
+                     (map #(assoc % :report_id id))
+                     (map convert-containment-path)
+                     (insert-records* :resource_events))
+                (when update-latest-report?
+                  (update-latest-report! certname))))))))
 
-(defn delete-reports-older-than!
+(defn-validated delete-reports-older-than!
   "Delete all reports in the database which have an `end-time` that is prior to
    the specified date/time."
-  [time]
-  {:pre [(kitchensink/datetime? time)]}
-  (when (not (sutils/postgres?))
+  [time :- pls/Timestamp]
+  (when-not (sutils/postgres?)
     (sql/update-values :certnames ["latest_report_id in (select id from reports where end_time < ?)"
                                    (to-timestamp time)]
                        {:latest_report_id nil}))
@@ -1156,12 +1104,12 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Public
 
-(pls/defn-validated add-certname!
+(defn-validated add-certname!
   "Add the given host to the db"
   [certname :- String]
   (sql/insert-record :certnames {:certname certname}))
 
-(pls/defn-validated maybe-activate-node!
+(defn-validated maybe-activate-node!
   "Reactivate the given host, only if it was deactivated before `time`.
   Returns true if the node is activated, or if it was already active.
 
@@ -1176,7 +1124,7 @@
                                      {:deactivated nil})]
     (pos? (first replaced))))
 
-(pls/defn-validated deactivate-node!
+(defn-validated deactivate-node!
   "Deactivate the given host, recording the current time. If the node is
   currently inactive, no change is made."
   [certname :- String]
@@ -1184,19 +1132,18 @@
                     WHERE certname=? AND deactivated IS NULL"
                    [(to-timestamp (now)) certname]))
 
-(pls/defn-validated catalog-newer-than?
+(defn-validated catalog-newer-than?
   "Returns true if the most current catalog for `certname` is more recent than
   `time`."
   [certname :- String
    time :- pls/Timestamp]
-  (let [timestamp (to-timestamp time)]
-    (sql/with-query-results result-set
-      ["SELECT timestamp FROM catalogs WHERE certname=? ORDER BY timestamp DESC LIMIT 1" certname]
-      (if-let [catalog-timestamp (:timestamp (first result-set))]
-        (.after catalog-timestamp timestamp)
-        false))))
+  (let [timestamp (to-timestamp time)
+        catalog-timestamp (-> "SELECT timestamp FROM catalogs WHERE certname=? ORDER BY timestamp DESC LIMIT 1"
+                              (query-to-vec certname)
+                              ((comp :timestamp first)))]
+    (and catalog-timestamp (.after catalog-timestamp timestamp))))
 
-(pls/defn-validated replace-catalog!
+(defn-validated replace-catalog!
   "Given a catalog, replace the current catalog, if any, for its
   associated host with the supplied one. `catalog-hash-debug-dir`
   is an optional path that indicates where catalog debugging information
@@ -1211,7 +1158,7 @@
           (sql/transaction
            (add-catalog! catalog catalog-hash-debug-dir timestamp)))))
 
-(pls/defn-validated replace-facts!
+(defn-validated replace-facts!
   "Updates the facts of an existing node, if the facts are newer than the current set of facts.
    Adds all new facts if no existing facts are found. Invoking this function under the umbrella of
    a repeatable read or serializable transaction enforces only one update to the facts of a certname
@@ -1224,19 +1171,13 @@
              (update-facts! fact-data))
            (add-facts! fact-data))))
 
-(pls/defn-validated add-report!
-  "Add a report and all of the associated events to the database."
-  [report :- reports/report-wireformat-schema
-   timestamp :- pls/Timestamp]
-  (add-report!* report timestamp true))
-
 (defn fail-on-unsupported
   "Log an error message to the log and console if the currently
   configured database is unsupported, then call fail-fn  (probably to
   exit)."
   [fail-fn]
-  (let [msg (db-unsupported?)]
-    (when-let [attn-msg (and msg (utils/attention-msg msg))]
+  (when-let [msg (db-unsupported?)]
+    (when-let [attn-msg (utils/attention-msg msg)]
       (utils/println-err attn-msg)
       (log/error attn-msg)
       (fail-fn))))

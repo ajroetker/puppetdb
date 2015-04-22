@@ -126,8 +126,7 @@
    (seq? value)               (seq (map anonymize-leaf-value value))
    (map? value)               (zipmap (take (count value)
                                             (repeatedly #(random-string 10)))
-                                      (vals (utils/update-vals value (keys value)
-                                                               anonymize-leaf-value)))
+                                      (map anonymize-leaf-value (vals value)))
    (nil? value)               nil
    :else (random-string 30)))
 
@@ -439,13 +438,12 @@
 (defn anonymize-fact-values
   "Anonymizes fact names and values"
   [facts context config]
-  (reduce-kv (fn [acc k v]
-               (assoc acc
-                 (anonymize-leaf k :fact-name (assoc context "fact-name" k) config)
-                 (anonymize-leaf v :fact-value (assoc context
-                                                 "fact-name" k
-                                                 "fact-value" v) config)))
-             {} facts))
+  (into {}
+        (for [[k v] facts]
+          [(anonymize-leaf k :fact-name (assoc context "fact-name" k) config)
+           (anonymize-leaf v :fact-value (assoc context
+                                                "fact-name" k
+                                                "fact-value" v) config)])))
 
 (defn anonymize-facts
   "Anonymize a fact set"

@@ -57,21 +57,22 @@
     (fn []
       (let [debug-dir (fs/absolute-path (tu/temp-dir))
             {:keys [persisted-hash] :as orig-catalog} (persist-catalog (:basic catalogs))
-            new-catalog (assoc-in (:basic catalogs)
-                                  [:resources {:type "File"
-                                               :title "/etc/foobar/bazv2"}]
-                                  {:type "File"
-                                   :title "/etc/foobar/bazv2"
-                                   :file nil
-                                   :line nil
-                                   :parameters {}
-                                   :resource "asdf"
-                                   :tags []
-                                   :exported false})
+            {:keys [certname resources edges] :as new-catalog}
+            (assoc-in (:basic catalogs)
+                      [:resources {:type "File"
+                                   :title "/etc/foobar/bazv2"}]
+                      {:type "File"
+                       :title "/etc/foobar/bazv2"
+                       :file nil
+                       :line nil
+                       :parameters {}
+                       :resource "asdf"
+                       :tags []
+                       :exported false})
             new-hash (shash/catalog-similarity-hash new-catalog)]
 
         (is (nil? (fs/list-dir debug-dir)))
-        (debug-catalog debug-dir new-hash new-catalog)
+        (debug-catalog debug-dir new-hash certname resources edges)
 
         (assert-debug-files-present debug-dir)
 
@@ -141,6 +142,6 @@
             new-hash-2 (shash/catalog-similarity-hash new-catalog-2)]
 
         (is (nil? (fs/list-dir debug-dir)))
-        (debug-catalog debug-dir new-hash-1 new-catalog-1)
-        (debug-catalog debug-dir new-hash-2 new-catalog-2)
+        (debug-catalog debug-dir new-hash-1 (:certname new-catalog-1) (:resources new-catalog-1) (:edges new-catalog-1))
+        (debug-catalog debug-dir new-hash-2 (:certname new-catalog-2) (:resources new-catalog-2) (:edges new-catalog-2))
         (is (= 10 (count (fs/list-dir debug-dir))))))))

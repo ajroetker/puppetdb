@@ -683,10 +683,6 @@
                hcore/format
                first)))
 
-(defn maybe-vectorize
-  [arg]
-  (if (vector? arg) arg [arg]))
-
 (defprotocol SQLGen
   (-plan->sql [query] "Given the `query` plan node, convert it to a SQL string"))
 
@@ -713,8 +709,8 @@
                     #(vector (:operator expr)
                              (-plan->sql %1)
                              (-plan->sql %2))
-                    (maybe-vectorize (:column expr))
-                    (maybe-vectorize (:value expr)))))
+                    (utils/vector-maybe (:column expr))
+                    (utils/vector-maybe (:value expr)))))
 
   ArrayBinaryExpression
   (-plan->sql [expr]
@@ -1084,11 +1080,11 @@
             (map->NotExpression {:clause (user-node->plan-node query-rec expression)})
 
             [["in" column subquery-expression]]
-            (map->InExpression {:column (columns->fields query-rec (maybe-vectorize column))
+            (map->InExpression {:column (columns->fields query-rec (utils/vector-maybe column))
                                 :subquery (user-node->plan-node query-rec subquery-expression)})
 
             [["extract" column expr]]
-            (create-extract-node query-rec (maybe-vectorize column) expr)
+            (create-extract-node query-rec (utils/vector-maybe column) expr)
 
             :else nil))
 

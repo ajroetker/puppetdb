@@ -1509,6 +1509,6 @@
 
            (merge-resource-hash ref->hash ref->resource)))))
 
-(deftest test-resources-exist?
+(deftest test-existing-resources
   (testing "With empty input"
-    (is (= #{}  (resources-exist? #{})))))
+    (is (= #{}  (existing-resources #{})))))

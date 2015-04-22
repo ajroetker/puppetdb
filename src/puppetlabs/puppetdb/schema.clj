@@ -100,14 +100,11 @@
   "Wraps each coercion function (value in the map) with a check
    to only covert the type if it's not already of that type."
   [m :- {Class (s/make-fn-schema s/Any s/Any)}]
-  (reduce-kv (fn [acc clazz f]
-               (assoc acc
-                 clazz
-                 (fn [obj]
-                   (if (instance? clazz obj)
-                     obj
-                     (f obj))) ))
-             {} m))
+  (into {}
+        (for [[clazz f] m]
+         [clazz (fn [obj]
+                 (cond->> obj
+                  (not (instance? clazz obj)) f))])))
 
 (def conversion-fns
   "Basic conversion functions for use by Schema"
