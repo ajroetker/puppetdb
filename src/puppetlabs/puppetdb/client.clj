@@ -1,5 +1,6 @@
 (ns puppetlabs.puppetdb.client
-  (:require [puppetlabs.puppetdb.command :as command]
+  (:import puppetlabs.puppetdb.command.core.Command)
+  (:require [puppetlabs.puppetdb.command.core :as command]
             [puppetlabs.puppetdb.http :as http]
             [clojure.tools.logging :as log]
             [puppetlabs.puppetdb.reports :as reports]
@@ -23,7 +24,7 @@
     version :- s/Int
     payload]
      (->> payload
-          (command/assemble-command command version)
+          (Command. command version)
           (submit-command-via-http! base-url)))
   ([base-url :- utils/base-url-schema
     command-map :- {s/Any s/Any}]

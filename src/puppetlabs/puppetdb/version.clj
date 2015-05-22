@@ -1,62 +1,65 @@
 (ns puppetlabs.puppetdb.version
-  "Versioning Utility Library
+  (:require [clojure.tools.logging :as log]
+            [net.cgrand.moustache :as moustache]
+            [puppetlabs.puppetdb.middleware
+             :refer [verify-accepts-json wrap-with-globals
+                     validate-no-query-params wrap-with-puppetdb-middleware]]
+            [puppetlabs.trapperkeeper.core :refer [defservice]]
+            [compojure.core :as compojure]
+            [puppetlabs.kitchensink.core :as kitchensink]
+            [puppetlabs.puppetdb.http :as http]
+            [puppetlabs.puppetdb.version.core :as v]))
 
-   This namespace contains some utility functions relating to checking version
-   numbers of various fun things."
-  (:require [trptcolin.versioneer.core :as version]
-            [clojure.java.jdbc :as sql]
-            [clojure.string :as string]
-            [clj-http.client :as client]
-            [ring.util.codec :as ring-codec]
-            [puppetlabs.puppetdb.cheshire :as json]
-            [puppetlabs.puppetdb.scf.storage-utils :as sutils]))
+(defn current-version
+  "Responds with the current version of PuppetDB as a JSON object containing a
+  `version` key."
+  [version]
+  (fn [_]
+    (if version
+      (http/json-response {:version version})
+      (http/error-response "Could not find version" 404))))
 
-;; ### PuppetDB current version
+(defn latest-version
+  "Responds with the latest version of PuppetDB as a JSON object containing a
+  `version` key with the version, as well as a `newer` key which is a boolean
+  specifying whether the latest version is newer than the current version."
+  [{:keys [update-server product-name scf-read-db]}]
+  {:pre [(and update-server product-name)]}
+  (fn [_]
+    (try
+      ;; if we get one of these requests from pe-puppetdb, we always want to
+      ;; return 'newer->false' so that the dashboard will never try to
+      ;; display info about a newer version being available
+      (if (= product-name "pe-puppetdb")
+        (http/json-response {:newer false :version (v/version) :link nil})
+        (if-let [result (v/update-info update-server scf-read-db)]
+          (http/json-response result)
+          (do (log/debugf "Unable to determine latest version via update-server: '%s'" update-server)
+              (http/error-response "Could not find version" 404))))
 
-(defn version*
-  "Get the version number of this PuppetDB installation."
-  []
-  {:post [(string? %)]}
-  (version/get-version "puppetlabs" "puppetdb"))
+      (catch java.io.IOException e
+        (log/debugf "Error when checking for latest version: %s" e)
+        (http/error-response
+         (format "Error when checking for latest version: %s" e))))))
 
-(def version
-  "Get the version number of this PuppetDB installation."
-  (memoize version*))
+(defn routes
+  [globals]
+  (moustache/app ["v1" ""] {:get (current-version (v/version))}
+                 ["v1" "latest"] {:get (latest-version globals)}))
+(defn build-app
+  [{:keys [authorizer] :as globals}]
+  (-> (routes globals)
+      verify-accepts-json
+      validate-no-query-params
+      (wrap-with-puppetdb-middleware authorizer))) 
 
-;; ### Utility functions for checking for the latest available version of PuppetDB
+(defservice version-service
+  [[:PuppetDBServer shared-globals]
+   [:WebroutingService add-ring-handler get-route]]
 
-(defn version-data*
-  "Build up a map of version data to be used in the 'latest version' check.
-
-  `db` is a map containing the database connection info, in the format
-  used by `clojure.jdbc`."
-  [db]
-  {:pre  [(map? db)]
-   :post [(map? %)]}
-  (sql/with-connection db
-    {:database-name    (sutils/sql-current-connection-database-name)
-     :database-version (string/join "." (sutils/sql-current-connection-database-version))}))
-
-(def version-data
-  "Build up a map of version data to be used in the 'latest version' check."
-  (memoize version-data*))
-
-(defn update-info
-  "Make a request to the puppetlabs server to determine the latest available
-  version of PuppetDB.  Returns the JSON object received from the server, which
-  is expected to be a map containing keys `:version`, `:newer`, and `:link`.
-
-  Returns `nil` if the request does not succeed for some reason."
-  [update-server db]
-  {:pre  [(string? update-server)
-          (map? db)]
-   :post [((some-fn map? nil?) %)]}
-  (let [current-version        (version)
-        version-data           (assoc (version-data db) :version current-version)
-        query-string           (ring-codec/form-encode version-data)
-        url                    (format "%s?product=puppetdb&%s" update-server query-string)
-        {:keys [status body]}  (client/get url {:throw-exceptions false
-                                                :retry-handler    (constantly false)
-                                                :accept           :json})]
-    (when (= status 200)
-      (json/parse-string body true))))
+  (start [this context]
+         (log/info "Starting version service")
+         (->> (build-app (shared-globals))
+              (compojure/context (get-route this) [])
+              (add-ring-handler this))
+         context))
