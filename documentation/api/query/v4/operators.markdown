@@ -143,8 +143,13 @@ Extract can also be used with a standalone function application:
 
     ["extract", [["function", "count"]], ["~", "certname", ".\*.com"]]
 
-At this time extract must always have an expression to extract from, like `["=", "certname", "foo.com"]`
-in the example above.
+Extract can also be used without a subexression, for example:
+
+    ["extract", "certname"]
+
+or
+
+    ["extract", [["function", "count"], "certname"], ["group_by", "certname"]]
 
 ### `function`
 
