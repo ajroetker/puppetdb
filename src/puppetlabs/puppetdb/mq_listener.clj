@@ -299,7 +299,7 @@
                                     (annotate-with-attempt exception)
                                     json/generate-string)]
          (with-open [producer (.createProducer session q)]
-           (->> (mq/delay-property 1 :seconds)
+           (->> (mq/delay-property 1 :hours)
                 (mq/to-jms-message session message-with-error)
                 (.send producer))))))))
 
