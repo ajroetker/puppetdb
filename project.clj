@@ -82,6 +82,7 @@
                  [prismatic/schema "1.0.4"]
                  [trptcolin/versioneer "0.2.0"]
                  [puppetlabs/trapperkeeper-status ~tk-status-version]
+                 [stockpile "0.0.1"]
                  [org.clojure/tools.macro "0.1.5"]
                  [com.novemberain/pantomime "2.1.0"]
                  [fast-zip-visit "1.0.2"]

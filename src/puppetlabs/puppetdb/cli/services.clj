@@ -47,6 +47,7 @@
             [clojure.string :as str]
             [clojure.tools.logging :as log]
             [compojure.core :as compojure]
+            [me.raynes.fs :as fs]
             [metrics.counters :as counters :refer [counter]]
             [metrics.gauges :refer [gauge-fn]]
             [metrics.timers :refer [time! timer]]
@@ -57,6 +58,8 @@
             [puppetlabs.puppetdb.command.constants :refer [command-names]]
             [puppetlabs.puppetdb.command.dlo :as dlo]
             [puppetlabs.puppetdb.config :as conf]
+            [puppetlabs.puppetdb.cli.shovel :as shovel]
+            [stockpile :as stockpile]
             [puppetlabs.puppetdb.http.server :as server]
             [puppetlabs.puppetdb.jdbc :as jdbc]
             [puppetlabs.puppetdb.meta.version :as version]
@@ -276,21 +279,6 @@
     (stop-and-reset-pool! pool))
   context)
 
-(defn- transfer-old-messages! [mq-endpoint]
-  (let [[pending exists?]
-        (try+
-         [(mq/queue-size "localhost" "com.puppetlabs.puppetdb.commands") true]
-         (catch [:type ::mq/queue-not-found] ex [0 false]))]
-    (when (pos? pending)
-      (log/infof "Transferring %d commands from legacy queue" pending)
-      (let [n (mq/transfer-messages! "localhost"
-                                     "com.puppetlabs.puppetdb.commands"
-                                     mq-endpoint)]
-        (log/infof "Transferred %d commands from legacy queue" n)))
-    (when exists?
-      (mq/remove-queue! "localhost" "com.puppetlabs.puppetdb.commands")
-      (log/info "Removed legacy queue"))))
-
 (defn initialize-schema
   "Ensure the database is migrated to the latest version, and warn if
   it's deprecated, log and exit if it's unsupported.
@@ -375,7 +363,6 @@
                    :scf-write-db write-db
                    :pretty-print pretty-print}
           clean-lock (ReentrantLock.)]
-      (transfer-old-messages! (conf/mq-endpoint config))
 
       (when-not disable-update-checking
         (maybe-check-for-updates config read-db))
@@ -447,7 +434,16 @@
           (jmx-reporter/start reporter))
         (assoc context :url-prefix (atom nil)))
   (start [this context]
-         (start-puppetdb context (get-config) this get-registered-endpoints))
+
+         (let [config (get-config)
+               vardir (get-in config [:global :vardir])]
+           (when-not (shovel/upgraded? vardir)
+             (shovel/activemq->stockpile config
+                                         (if (fs/exists? (shovel/stockpile-path vardir))
+                                           (first (stockpile/open (shovel/stockpile-path vardir) (fn [acc _] acc) nil))
+                                           (stockpile/create (shovel/stockpile-path vardir))))
+             (shovel/lock-upgrade vardir))
+           (start-puppetdb context config this get-registered-endpoints)))
 
   (stop [this context]
         (doseq [{:keys [reporter]} (vals metrics/metrics-registries)]

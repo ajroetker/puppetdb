@@ -11,12 +11,16 @@
             MessageConsumer
             Queue
             Message]
+           [java.io File ByteArrayInputStream]
            [org.apache.activemq.broker BrokerService]
            [org.apache.activemq.usage SystemUsage MemoryUsage]
            [org.apache.activemq.pool PooledConnectionFactory]
            [org.apache.activemq ActiveMQConnectionFactory ScheduledMessage])
   (:require [clojure.tools.logging :as log]
             [clojure.java.io :as io]
+            [me.raynes.fs :as fs]
+            [stockpile :as stockpile]
+            [puppetlabs.puppetdb.cheshire :as json]
             [puppetlabs.i18n.core :as i18n]
             [puppetlabs.trapperkeeper.config :as config]
             [puppetlabs.trapperkeeper.logging :as logutils]
@@ -24,8 +28,7 @@
             [puppetlabs.puppetdb.config :as conf]
             [puppetlabs.puppetdb.utils :as utils]
             [puppetlabs.puppetdb.command.dlo :as dlo]
-            [puppetlabs.puppetdb.command :as cmd]
-            [clojure.pprint]))
+            [puppetlabs.puppetdb.command :as cmd]))
 
 (def cli-description "Transfer messages from ActiveMQ to Stockpile")
 
@@ -47,33 +50,25 @@
   "Creates a map of custom headers included in `message`, currently only
   supports String headers."
   [^Message msg]
-  (reduce (fn [acc k]
-            (assoc acc
-              (keyword k)
-              (.getStringProperty msg k)))
-          {} (enumeration-seq (.getPropertyNames msg))))
+  (into {}
+        (for [k (enumeration-seq (.getPropertyNames msg))]
+          [(keyword k) (.getStringProperty msg k)])))
 
-(defn convert-message-body
-  "Convert the given `message` to a string using the type-specific method."
-  [^Message message]
-  (cond
-   (instance? javax.jms.TextMessage message)
-   (let [^TextMessage text-message message]
-     (.getText text-message))
-   (instance? javax.jms.BytesMessage message)
-   (let [^BytesMessage bytes-message message
-         len (.getBodyLength message)
-         buf (byte-array len)
-         n (.readBytes bytes-message buf)]
-     (when (not= len n)
-       (throw (Exception. (i18n/trs "Only read {0}/{1} bytes from incoming message" n len))))
-     (String. buf "UTF-8"))
-   :else
-   (throw (Exception. (i18n/trs "Expected TextMessage or BytesMessage; found {0}"
-                                (class message))))))
+(defprotocol ConvertMessageBody
+  (convert-message-body ^String [msg]))
 
-(defn convert-jms-message [m]
-  {:headers (extract-headers m) :body (convert-message-body m)})
+(extend-protocol ConvertMessageBody
+  TextMessage
+  (convert-message-body [msg]
+    (.getText msg))
+  BytesMessage
+  (convert-message-body [msg]
+    (let [len (.getBodyLength msg)
+          buf (byte-array len)
+          n (.readBytes msg buf)]
+      (when (not= len n)
+        (throw (Exception. (i18n/trs "Only read {0}/{1} bytes from incoming message" n len))))
+      (String. buf "UTF-8"))))
 
 (defn create-message-processor
   [discard-dir stockpiler-fn]
@@ -83,14 +78,16 @@
       ;; When the queue is shutting down, it sends nil message
       (when message
         (try
-          (let [msg (convert-jms-message message)]
+          (let [msg {:headers (extract-headers message)
+                     :body (convert-message-body message)}]
             (try
-              (let [{:keys [command version annotations] :as parsed-result} (cmd/parse-command msg)
-                    id (:id annotations)]
+              (let [{:keys [command version annotations] :as parsed-result}
+                    (cmd/parse-command msg)]
                 (try
                   (stockpiler-fn parsed-result)
                   (catch Exception ex
-                    (log/error ex (i18n/trs "[{0}] [{1}] [{2}] Unable to process message" id command version))
+                    (log/error ex (i18n/trs "[{0}] [{1}] [{2}] Unable to process message"
+                                            (:id annotations) command version))
                     (discard-message parsed-result ex))))
               (catch AssertionError ex
                 (log/error ex (i18n/trs "Unable to process message: {0}" msg))
@@ -107,6 +104,8 @@
 (defn consume-everything [^MessageConsumer consumer process-message]
   (try
     (loop []
+      ;; We'll wait 5 seconds for a message otherwise we'll assume the Queue is
+      ;; drained
       (when-let [msg (.receive consumer 5000)]
         (process-message msg)
         (recur)))
@@ -154,8 +153,6 @@
 (def default-mq-endpoint "puppetlabs.puppetdb.commands")
 (def retired-mq-endpoint "com.puppetlabs.puppetdb.commands")
 
-(defn stockpiler [msg] (clojure.pprint/pprint msg))
-
 (defn- set-usage!
   "Internal helper function for setting `SystemUsage` values on a `BrokerService`
   instance.
@@ -172,12 +169,11 @@
    ^String desc]
   {:pre [((some-fn nil? integer?) megabytes)
          (fn? usage-fn)]}
-  (when megabytes
+  (when-let [limit (some-> megabytes (* 1024 1024))]
     (log/info (i18n/trs "Setting ActiveMQ {0} limit to {1} MB" desc megabytes))
-    (-> broker
-        (.getSystemUsage)
-        (usage-fn)
-        (.setLimit (* megabytes 1024 1024))))
+    (-> (.getSystemUsage broker)
+        usage-fn
+        (.setLimit limit)))
   broker)
 
 (defn ^:dynamic enable-jmx
@@ -269,9 +265,35 @@
       [(ActiveMQConnectionFactory. spec)]
     (close [] (.stop this))))
 
+;; Questionable code
+
+(defn stockpile-path [vardir]
+  (str (io/file vardir "cmd")))
+
+(defn upgrade-lockfile-path [vardir]
+  (str (io/file vardir "upgraded_mq.lock")))
+
+(defn upgraded? [vardir]
+  (fs/exists? (upgrade-lockfile-path vardir)))
+
+(defn lock-upgrade [vardir]
+  (fs/touch (upgrade-lockfile-path vardir)))
+
+(defn stockpiler-fn [q]
+  (fn [{:keys [command version payload] :as msg}]
+    ;; discard msg if we can't find the certname
+    (let [input-stream (ByteArrayInputStream.
+                        (-> (:body msg)
+                            json/generate-string
+                            (.getBytes "UTF-8")))]
+      (stockpile/store q input-stream (format "%s-%s-%s" command version (:certname payload))))))
+
+;;
+
 (defn activemq->stockpile
   [{global-config :global
-    {mq-config :mq :as cmd-proc-config} :command-processing}]
+    {mq-config :mq :as cmd-proc-config} :command-processing}
+   q]
   ;; Starting
   (let [mq-dir (str (io/file (:vardir global-config) "mq"))
         mq-broker-url (format "%s&wireFormat.maxFrameSize=%s&marshal=true"
@@ -282,18 +304,19 @@
         conn-pool (activemq-connection-factory mq-broker-url)
         broker (do (log/info (i18n/trs "Starting broker"))
                    (build-and-start-broker! "localhost" mq-dir cmd-proc-config))
-        process-message (create-message-processor mq-discard-dir stockpiler)]
+        process-message (create-message-processor mq-discard-dir (stockpiler-fn q))]
 
-    ;; Real work
+    ;; Drain the scheduler so we don't get any extra messages on the Queue when
+    ;; we're processing
     (create-scheduler-receiver conn-pool mq-endpoint process-message)
     (create-mq-receiver conn-pool mq-endpoint process-message)
     (create-mq-receiver conn-pool retired-mq-endpoint process-message)
 
     ;; Stopping
-    (log/info (i18n/trs "Stopping ActiveMQConnectionFactory"))
-    (.stop conn-pool)
-    (log/info (i18n/trs "Stopping broker"))
-    (stop-broker! broker)
+    (do (log/info (i18n/trs "Stopping ActiveMQConnectionFactory"))
+        (.stop conn-pool))
+    (do (log/info (i18n/trs "Stopping broker"))
+        (stop-broker! broker))
     (log/info (i18n/trs "You may safely delete {0}" mq-dir))))
 
 (defn- validate-cli!
@@ -308,6 +331,12 @@
 
 (defn -main
   [& args]
-  (let [[{:keys [config]}] (validate-cli! args)]
+  (let [[{:keys [config]}] (validate-cli! args)
+        vardir (get-in config [:global :vardir])
+        q (if (fs/exists? (stockpile-path vardir))
+            (first (stockpile/open (stockpile-path vardir) (fn [acc _] acc) nil))
+            (stockpile/create (stockpile-path vardir)))]
     (logutils/configure-logging! (:logging-config (:global config)))
-    (activemq->stockpile config)))
+    (activemq->stockpile config q)))
+
+
