@@ -201,8 +201,8 @@
 
 (defn throw+-cli-error!
   [msg]
-  (throw+ {:type ::cli-error
-           :message msg}))
+  (throw+ {:kind ::cli-error
+           :msg msg}))
 
 (defn validate-cli-base-url!
   "A utility function which will validate the base-url
@@ -217,8 +217,8 @@
   (try+
    (body)
    (catch map? m
-     (println (:message m))
-     (case (kitchensink/without-ns (:type m))
+     (println (:msg m))
+     (case (kitchensink/without-ns (:kind m))
        :cli-error (System/exit 1)
        :cli-help (System/exit 0)
        (throw+ m)))))
@@ -296,7 +296,7 @@
   [s]
   (when (and (string? s) (re-find #"\\E" s))
     (throw (IllegalArgumentException.
-            (tru "cannot regex-quote strings containing '\\E'"))))
+            (tru "cannot regex-quote strings containing ''\\E''"))))
   (format "\\Q%s\\E" (str s)))
 
 (defn match-any-of
